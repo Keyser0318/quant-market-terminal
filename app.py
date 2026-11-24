@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(page_title="Quant Market Terminal", layout="wide")
+st.set_page_config(page_title="Quant Market Terminal", page_icon="📈", layout="wide")
 st.title("Quant Market Terminal")
 
 # Sidebar controls
@@ -26,6 +26,8 @@ def fetch_history(sym, start):
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     data.columns = [c.lower() for c in data.columns]
+    if "close" in data.columns:
+        data = data.dropna(subset=["close"])
     return data
 
 # Standard normal PDF & CDF without external dependencies
