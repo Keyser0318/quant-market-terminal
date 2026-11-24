@@ -1,4 +1,5 @@
 import datetime
+import math
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -27,6 +28,41 @@ def fetch_history(sym, start):
     data.columns = [c.lower() for c in data.columns]
     return data
 
+# Standard normal PDF & CDF without external dependencies
+def norm_pdf(x):
+    return np.exp(-0.5 * x**2) / np.sqrt(2.0 * np.pi)
+
+def norm_cdf(x):
+    if isinstance(x, np.ndarray):
+        return 0.5 * (1.0 + np.vectorize(math.erf)(x / np.sqrt(2.0)))
+    return 0.5 * (1.0 + math.erf(x / np.sqrt(2.0)))
+
+def black_scholes_greeks(S, K, T, r, sigma):
+    T = max(T, 1e-6)
+    sigma = max(sigma, 1e-6)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+
+    call_price = S * norm_cdf(d1) - K * np.exp(-r * T) * norm_cdf(d2)
+    put_price = K * np.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
+
+    delta_call = norm_cdf(d1)
+    delta_put = delta_call - 1.0
+    gamma = norm_pdf(d1) / (S * sigma * np.sqrt(T))
+    vega = (S * norm_pdf(d1) * np.sqrt(T)) / 100.0  # per 1% vol change
+    theta_call = (-(S * norm_pdf(d1) * sigma) / (2.0 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm_cdf(d2)) / 365.0
+    theta_put = (-(S * norm_pdf(d1) * sigma) / (2.0 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm_cdf(-d2)) / 365.0
+    rho_call = (K * T * np.exp(-r * T) * norm_cdf(d2)) / 100.0
+    rho_put = (-K * T * np.exp(-r * T) * norm_cdf(-d2)) / 100.0
+
+    return {
+        "call": call_price, "put": put_price,
+        "delta_call": delta_call, "delta_put": delta_put,
+        "gamma": gamma, "vega": vega,
+        "theta_call": theta_call, "theta_put": theta_put,
+        "rho_call": rho_call, "rho_put": rho_put,
+    }
+
 if ticker:
     try:
         with st.spinner(f"Loading market data & analytics for {ticker}..."):
@@ -44,23 +80,26 @@ if ticker:
         sharpe = (ann_ret - rf_rate) / ann_vol if ann_vol > 0 else 0
         rolling_max = df["close"].cummax()
         max_dd = ((df["close"] - rolling_max) / rolling_max).min()
+        latest_spot = float(df["close"].iloc[-1])
 
         # Top KPI banner
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Latest Close", f"${df['close'].iloc[-1]:.2f}", f"{df['close'].pct_change().iloc[-1]*100:.2f}%")
+        c1.metric("Latest Close", f"${latest_spot:.2f}", f"{df['close'].pct_change().iloc[-1]*100:.2f}%")
         c2.metric("Annualized Return", f"{ann_ret*100:.2f}%")
         c3.metric("Annualized Volatility", f"{ann_vol*100:.2f}%")
         c4.metric("Sharpe Ratio", f"{sharpe:.2f}")
         c5.metric("Max Drawdown", f"{max_dd*100:.2f}%")
 
-        # 6-Tab Bloomberg-style workspace
-        tab_news, tab_chart, tab_options, tab_mc, tab_macro, tab_fund = st.tabs([
+        # 8-Tab Quantitative Terminal Workspace
+        tab_news, tab_chart, tab_options, tab_bs, tab_mc, tab_risk, tab_macro, tab_fund = st.tabs([
             "Live News Feed",
-            "Price, Volatility & Alpha",
-            "Options & Implied Vol",
-            "Monte Carlo Simulation",
-            "Macro & Cross-Asset",
-            "Fundamentals & Data"
+            "Price & Alpha",
+            "Options Chain",
+            "Black-Scholes & Greeks",
+            "Monte Carlo",
+            "Correlation & VaR Risk",
+            "Macro Pulse",
+            "Fundamentals"
         ])
 
         # TAB 1: LIVE FINANCIAL NEWS
@@ -133,17 +172,62 @@ if ticker:
             except Exception as e:
                 st.warning(f"Options data unavailable for {ticker}: {e}")
 
-        # TAB 4: MONTE CARLO GBM SIMULATION
+        # TAB 4: BLACK-SCHOLES OPTION PRICING & GREEKS
+        with tab_bs:
+            st.subheader(f"Black-Scholes-Merton European Option Pricer ({ticker})")
+            b1, b2, b3 = st.columns(3)
+            bs_strike = b1.number_input("Strike Price (K)", value=round(latest_spot, 2), step=1.0)
+            bs_days = b2.slider("Days to Expiration (DTE)", 1, 365, 30)
+            default_vol = float(ann_vol * 100) if not np.isnan(ann_vol) else 25.0
+            bs_vol = b3.number_input("Volatility σ (%)", value=round(default_vol, 2), step=1.0) / 100.0
+
+            T_years = bs_days / 365.0
+            greeks = black_scholes_greeks(latest_spot, bs_strike, T_years, rf_rate, bs_vol)
+
+            p1, p2 = st.columns(2)
+            p1.metric("Theoretical Call Price", f"${greeks['call']:.2f}")
+            p2.metric("Theoretical Put Price", f"${greeks['put']:.2f}")
+
+            greeks_table = pd.DataFrame({
+                "Greek": ["Delta (Δ)", "Gamma (Γ)", "Vega (ν / 1% vol)", "Theta (Θ / day)", "Rho (ρ / 1% rate)"],
+                "Call": [
+                    round(greeks["delta_call"], 4),
+                    round(greeks["gamma"], 4),
+                    round(greeks["vega"], 4),
+                    round(greeks["theta_call"], 4),
+                    round(greeks["rho_call"], 4),
+                ],
+                "Put": [
+                    round(greeks["delta_put"], 4),
+                    round(greeks["gamma"], 4),
+                    round(greeks["vega"], 4),
+                    round(greeks["theta_put"], 4),
+                    round(greeks["rho_put"], 4),
+                ]
+            })
+            st.dataframe(greeks_table, use_container_width=True, hide_index=True)
+
+            # Spot sensitivity curve
+            spot_grid = np.linspace(latest_spot * 0.75, latest_spot * 1.25, 60)
+            curve_data = [black_scholes_greeks(s, bs_strike, T_years, rf_rate, bs_vol) for s in spot_grid]
+            curve_df = pd.DataFrame({
+                "Spot Price": spot_grid,
+                "Call Value": [x["call"] for x in curve_data],
+                "Put Value": [x["put"] for x in curve_data],
+            }).set_index("Spot Price")
+            st.subheader("Option Price Sensitivity Across Spot Prices")
+            st.line_chart(curve_df)
+
+        # TAB 5: MONTE CARLO GBM SIMULATION
         with tab_mc:
             st.subheader(f"Geometric Brownian Motion Simulation ({sim_days} Days, {sim_paths} Paths)")
-            last_price = df["close"].iloc[-1]
             mu = df["log_ret"].mean()
             sigma = df["log_ret"].std()
 
             rng = np.random.default_rng(42)
             dt = 1
             shocks = rng.normal((mu - 0.5 * sigma**2) * dt, sigma * np.sqrt(dt), size=(sim_days, sim_paths))
-            price_paths = last_price * np.exp(np.cumsum(shocks, axis=0))
+            price_paths = latest_spot * np.exp(np.cumsum(shocks, axis=0))
             mc_df = pd.DataFrame(price_paths)
 
             st.line_chart(mc_df.iloc[:, :40])
@@ -154,7 +238,66 @@ if ticker:
             m2.metric("95% VaR (5th Percentile)", f"${np.percentile(final_prices, 5):.2f}")
             m3.metric("95th Percentile Upside", f"${np.percentile(final_prices, 95):.2f}")
 
-        # TAB 5: MACRO & CROSS-ASSET WATCHLIST
+        # TAB 6: MULTI-ASSET CORRELATION & VAR RISK PANEL
+        with tab_risk:
+            st.subheader("Multi-Asset Portfolio Risk & Correlation Matrix")
+            r_col1, r_col2 = st.columns([2, 1])
+            raw_tickers = r_col1.text_input("Portfolio Tickers (comma-separated)", value=f"{ticker}, MSFT, NVDA, SPY, GLD")
+            port_value = r_col2.number_input("Portfolio Notional ($)", value=100000, step=5000)
+
+            symbols = [s.strip().upper() for s in raw_tickers.split(",") if s.strip()]
+            if len(symbols) >= 2:
+                close_dict = {}
+                for sym in symbols:
+                    try:
+                        hist = fetch_history(sym, start_date)
+                        if not hist.empty and "close" in hist.columns:
+                            close_dict[sym] = hist["close"]
+                    except Exception:
+                        pass
+
+                if len(close_dict) >= 2:
+                    prices_df = pd.DataFrame(close_dict).dropna()
+                    rets_df = prices_df.pct_change().dropna()
+
+                    n_assets = len(rets_df.columns)
+                    weights = np.array([1.0 / n_assets] * n_assets)
+                    port_daily_ret = rets_df.values @ weights
+
+                    port_ann_ret = np.mean(port_daily_ret) * 252
+                    port_ann_vol = np.std(port_daily_ret) * np.sqrt(252)
+                    port_sharpe = (port_ann_ret - rf_rate) / port_ann_vol if port_ann_vol > 0 else 0
+
+                    # Historical & Parametric 1-Day VaR and CVaR (Expected Shortfall)
+                    var_95_hist = -np.percentile(port_daily_ret, 5) * port_value
+                    var_99_hist = -np.percentile(port_daily_ret, 1) * port_value
+                    cvar_95 = -port_daily_ret[port_daily_ret <= np.percentile(port_daily_ret, 5)].mean() * port_value
+                    var_95_param = -(np.mean(port_daily_ret) - 1.64485 * np.std(port_daily_ret)) * port_value
+
+                    rk1, rk2, rk3, rk4 = st.columns(4)
+                    rk1.metric("Equal-Weight Ann. Return", f"{port_ann_ret*100:.2f}%")
+                    rk2.metric("Portfolio Ann. Volatility", f"{port_ann_vol*100:.2f}%")
+                    rk3.metric("Portfolio Sharpe Ratio", f"{port_sharpe:.2f}")
+                    rk4.metric("1-Day 95% Hist. VaR", f"${var_95_hist:,.2f}")
+
+                    rk5, rk6, rk7 = st.columns(3)
+                    rk5.metric("1-Day 95% Parametric VaR", f"${var_95_param:,.2f}")
+                    rk6.metric("1-Day 99% Hist. VaR", f"${var_99_hist:,.2f}")
+                    rk7.metric("1-Day 95% CVaR (Expected Shortfall)", f"${cvar_95:,.2f}")
+
+                    st.subheader("Pairwise Daily Return Correlation Matrix")
+                    corr_matrix = rets_df.corr().round(3)
+                    st.dataframe(corr_matrix, use_container_width=True)
+
+                    st.subheader("Cumulative Equal-Weight Portfolio Growth ($)")
+                    port_cum = (1 + pd.Series(port_daily_ret, index=rets_df.index)).cumprod() * port_value
+                    st.line_chart(port_cum.rename("Portfolio Value ($)"))
+                else:
+                    st.warning("Could not load enough valid tickers to compute correlation.")
+            else:
+                st.info("Enter at least two comma-separated tickers.")
+
+        # TAB 7: MACRO & CROSS-ASSET WATCHLIST
         with tab_macro:
             st.subheader("Cross-Asset Pulse (Equities, Volatility, Rates, Commodities, FX)")
             macro_tickers = {
@@ -180,7 +323,7 @@ if ticker:
             if macro_rows:
                 st.dataframe(pd.DataFrame(macro_rows), use_container_width=True)
 
-        # TAB 6: FUNDAMENTALS & RAW DATA
+        # TAB 8: FUNDAMENTALS & RAW DATA
         with tab_fund:
             st.subheader(f"{ticker} Company Profile & Key Stats")
             try:
