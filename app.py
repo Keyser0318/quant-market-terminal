@@ -1,3 +1,5 @@
+import os
+os.environ["OPENBB_AUTO_BUILD"] = "false"
 import datetime
 import numpy as np
 import pandas as pd
