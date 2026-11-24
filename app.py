@@ -1,21 +1,11 @@
-import os
-os.environ["OPENBB_AUTO_BUILD"] = "false"
 import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
+import yfinance as yf
 
 st.set_page_config(page_title="Quant Market Terminal", layout="wide")
 st.title("Quant Market Terminal")
-
-@st.cache_resource
-def load_openbb():
-    import openbb
-    openbb.build()
-    from openbb import obb
-    return obb
-
-obb = load_openbb()
 
 # Sidebar controls
 st.sidebar.header("Terminal Controls")
@@ -29,15 +19,19 @@ st.sidebar.subheader("Monte Carlo Settings")
 sim_days = st.sidebar.slider("Forecast Horizon (Trading Days)", 21, 252, 63)
 sim_paths = st.sidebar.slider("Simulated Paths", 50, 500, 150)
 
+@st.cache_data(ttl=300)
+def fetch_history(sym, start):
+    data = yf.download(sym, start=str(start), progress=False)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    data.columns = [c.lower() for c in data.columns]
+    return data
+
 if ticker:
     try:
         with st.spinner(f"Loading market data & analytics for {ticker}..."):
-            df = obb.equity.price.historical(
-                symbol=ticker, start_date=str(start_date), provider="yfinance"
-            ).to_dataframe()
-            bench_df = obb.equity.price.historical(
-                symbol=benchmark, start_date=str(start_date), provider="yfinance"
-            ).to_dataframe()
+            df = fetch_history(ticker, start_date)
+            bench_df = fetch_history(benchmark, start_date)
 
         # Core quantitative metrics
         df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
@@ -75,34 +69,30 @@ if ticker:
             with col_n1:
                 st.subheader(f"{ticker} Company Headlines")
                 try:
-                    comp_news = obb.news.company(symbol=ticker, limit=12, provider="yfinance").to_dataframe()
-                    for _, row in comp_news.iterrows():
-                        title = row.get("title", "No title")
-                        url = row.get("url", "")
-                        date_str = str(row.get("date", ""))[:16]
-                        st.markdown(f"**[{title}]({url})**  \n`{date_str}`")
+                    comp_news = yf.Ticker(ticker).news or []
+                    for item in comp_news[:12]:
+                        content = item.get("content", item)
+                        title = content.get("title", "No title")
+                        url = (content.get("canonicalUrl") or {}).get("url") or content.get("link", "")
+                        pub_date = str(content.get("pubDate", ""))[:16]
+                        st.markdown(f"**[{title}]({url})**  \n`{pub_date}`")
                         st.divider()
                 except Exception as e:
                     st.info(f"Company news unavailable: {e}")
 
             with col_n2:
-                st.subheader("Global Market Wire")
+                st.subheader("Global Market Wire (S&P 500)")
                 try:
-                    world_news = obb.news.world(limit=12, provider="yfinance").to_dataframe()
-                    for _, row in world_news.iterrows():
-                        title = row.get("title", "No title")
-                        url = row.get("url", "")
-                        date_str = str(row.get("date", ""))[:16]
-                        st.markdown(f"**[{title}]({url})**  \n`{date_str}`")
+                    spy_news = yf.Ticker("SPY").news or []
+                    for item in spy_news[:12]:
+                        content = item.get("content", item)
+                        title = content.get("title", "No title")
+                        url = (content.get("canonicalUrl") or {}).get("url") or content.get("link", "")
+                        pub_date = str(content.get("pubDate", ""))[:16]
+                        st.markdown(f"**[{title}]({url})**  \n`{pub_date}`")
                         st.divider()
-                except Exception:
-                    spy_news = obb.news.company(symbol="SPY", limit=12, provider="yfinance").to_dataframe()
-                    for _, row in spy_news.iterrows():
-                        title = row.get("title", "No title")
-                        url = row.get("url", "")
-                        date_str = str(row.get("date", ""))[:16]
-                        st.markdown(f"**[{title}]({url})**  \n`{date_str}`")
-                        st.divider()
+                except Exception as e:
+                    st.info(f"Market wire unavailable: {e}")
 
         # TAB 2: PRICE, VOLATILITY & BENCHMARK
         with tab_chart:
@@ -125,20 +115,20 @@ if ticker:
         with tab_options:
             st.subheader(f"{ticker} Live Options Chain (Calls & Puts)")
             try:
-                chains = obb.derivatives.options.chains(symbol=ticker, provider="yfinance").to_dataframe()
-                expiries = sorted(chains["expiration"].astype(str).unique())
+                tk = yf.Ticker(ticker)
+                expiries = tk.options
                 selected_exp = st.selectbox("Select Expiration Date", expiries)
-                sub_chain = chains[chains["expiration"].astype(str) == selected_exp]
+                chain = tk.option_chain(selected_exp)
 
-                opt_type = st.radio("Option Type", ["call", "put"], horizontal=True)
-                filtered_opt = sub_chain[sub_chain["option_type"] == opt_type]
+                opt_type = st.radio("Option Type", ["Calls", "Puts"], horizontal=True)
+                filtered_opt = chain.calls if opt_type == "Calls" else chain.puts
 
-                cols_to_show = [c for c in ["strike", "last_trade_price", "bid", "ask", "volume", "open_interest", "implied_volatility"] if c in filtered_opt.columns]
+                cols_to_show = [c for c in ["strike", "lastPrice", "bid", "ask", "volume", "openInterest", "impliedVolatility"] if c in filtered_opt.columns]
                 st.dataframe(filtered_opt[cols_to_show], use_container_width=True)
 
-                if "implied_volatility" in filtered_opt.columns and "strike" in filtered_opt.columns:
+                if "impliedVolatility" in filtered_opt.columns and "strike" in filtered_opt.columns:
                     st.subheader("Volatility Smile / Skew Across Strikes")
-                    smile_df = filtered_opt[["strike", "implied_volatility"]].dropna().set_index("strike")
+                    smile_df = filtered_opt[["strike", "impliedVolatility"]].dropna().set_index("strike")
                     st.line_chart(smile_df)
             except Exception as e:
                 st.warning(f"Options data unavailable for {ticker}: {e}")
@@ -180,7 +170,7 @@ if ticker:
             macro_rows = []
             for label, sym in macro_tickers.items():
                 try:
-                    m_df = obb.equity.price.historical(symbol=sym, start_date=str(datetime.date.today() - datetime.timedelta(days=10)), provider="yfinance").to_dataframe()
+                    m_df = fetch_history(sym, datetime.date.today() - datetime.timedelta(days=10))
                     last_val = m_df["close"].iloc[-1]
                     prev_val = m_df["close"].iloc[-2]
                     chg = ((last_val - prev_val) / prev_val) * 100
@@ -194,8 +184,9 @@ if ticker:
         with tab_fund:
             st.subheader(f"{ticker} Company Profile & Key Stats")
             try:
-                profile = obb.equity.profile(symbol=ticker, provider="yfinance").to_dataframe()
-                st.dataframe(profile.T, use_container_width=True)
+                info = yf.Ticker(ticker).info
+                key_fields = {k: info.get(k) for k in ["shortName", "sector", "industry", "marketCap", "trailingPE", "forwardPE", "beta", "dividendYield", "fiftyTwoWeekHigh", "fiftyTwoWeekLow"] if k in info}
+                st.dataframe(pd.DataFrame.from_dict(key_fields, orient="index", columns=["Value"]), use_container_width=True)
             except Exception:
                 st.info("Profile data unavailable.")
             st.subheader("Historical OHLCV & Quantitative Series")
