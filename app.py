@@ -8,6 +8,8 @@ st.title("Quant Market Terminal")
 
 @st.cache_resource
 def load_openbb():
+    import openbb
+    openbb.build()
     from openbb import obb
     return obb
 
@@ -92,7 +94,6 @@ if ticker:
                         st.markdown(f"**[{title}]({url})**  \n`{date_str}`")
                         st.divider()
                 except Exception:
-                    # Fallback to broad market ETF headlines if world wire is empty
                     spy_news = obb.news.company(symbol="SPY", limit=12, provider="yfinance").to_dataframe()
                     for _, row in spy_news.iterrows():
                         title = row.get("title", "No title")
@@ -153,7 +154,7 @@ if ticker:
             price_paths = last_price * np.exp(np.cumsum(shocks, axis=0))
             mc_df = pd.DataFrame(price_paths)
 
-            st.line_chart(mc_df.iloc[:, :40])  # Plot first 40 paths cleanly
+            st.line_chart(mc_df.iloc[:, :40])
 
             final_prices = price_paths[-1, :]
             m1, m2, m3 = st.columns(3)
