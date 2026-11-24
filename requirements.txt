@@ -1,0 +1,7 @@
+streamlit
+openbb
+openbb-equity
+openbb-yfinance
+openbb-derivatives
+numpy
+pandas
